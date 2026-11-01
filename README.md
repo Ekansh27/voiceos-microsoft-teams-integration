@@ -42,7 +42,7 @@ The first time a tool runs, the Microsoft sign-in opens in the browser. Sign in,
 
 ## Testing
 
-`bun install && bun test` runs 21 offline tests. They start the real server over MCP with `tests/mock-composio.ts` preloaded, which replaces `fetch` with a fake Composio, so no keys or network are needed. They cover the manifest (the six tools, confirmations only on writes, card fields bound to real inputs, declared env vars, the network allowlist), every tool's arguments and results, and the not-connected, expired, revoked-token and missing-setup paths.
+`bun install && bun test` runs 24 offline tests. They start the real server over MCP with `tests/mock-composio.ts` preloaded, which replaces `fetch` with a fake Composio, so no keys or network are needed. They cover the manifest (the six tools, confirmations only on writes, card fields bound to real inputs, declared env vars, the network allowlist), every tool's arguments and results (including reading IDs from a post's link), and the not-connected, expired, revoked-token and missing-setup paths.
 
 Tested live on Nov 1, 2026 with a UIUC Microsoft 365 account:
 
@@ -50,12 +50,12 @@ Tested live on Nov 1, 2026 with a UIUC Microsoft 365 account:
 - Create channel returns the expected admin-approval error
 - Deleting the Composio connection gives the reconnect message, and one sign-in recovers
 
-Reply to message is untested, because the test account isn't in any Teams team.
+Reply to message is untested live, because the test account isn't in any Teams team. Its link parsing is covered by the offline tests.
 
 ## Known limitations
 
 - **Create channel needs admin approval.** Microsoft always requires an org admin to approve `Channel.Create`, and including it blocked sign-in for everyone, so it is left out of the scopes. The tool returns a clear "needs admin approval" error until an admin approves it.
-- **Reply and Create channel need IDs from the user.** They need team, channel and message IDs, and none of the six tools can look them up.
+- **Reply needs the post's link.** The user copies it with Copy link on the post in Teams, and the server reads the team, channel and post IDs from it. Finding the post by name or author would need `ChannelMessage.Read.All`, which always requires admin approval, and integrations don't get screen context from VoiceOS. Create channel still needs a team ID.
 - **No disconnect UI.** VoiceOS has no settings screens for integrations, and the ticket allows only six tools. Users disconnect by deleting their connection in the Composio dashboard. A `disconnect_teams` tool can be added if approved.
 - **Some old meeting chats still appear in Get all chats.** Chats hidden by the user are skipped, but Teams also hides inactive meeting chats in its own UI without marking them hidden in Microsoft's data. They show up below the recent chats, since the list is sorted newest first.
 - **Personal Microsoft accounts don't work.** Microsoft's Teams API only supports licensed work or school accounts.

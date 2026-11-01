@@ -188,6 +188,47 @@ describe("connected account", () => {
     expect(r.html).toContain("Reply Sent");
   });
 
+  test("reply_to_message reads the team, channel and post IDs from a post's link", async () => {
+    const link =
+      "https://teams.microsoft.com/l/message/19%3A4a95f7d8db4c4e7fae857bcebe0623e6%40thread.tacv2/1616990032035" +
+      "?groupId=fbe2bf47-16c8-47cf-b4a5-4b9b187c508b&tenantId=2432b57b-0abd-43db-aa7b-16eadd115d34&createdTime=1616990032035";
+    const r = await run(server, "reply_to_message", { message_link: link, content: "Sounds good" });
+    expect(r.isError).toBe(false);
+    expect(lastArguments(server, "MICROSOFT_TEAMS_POST_MESSAGE_REPLY")).toEqual({
+      team_id: "fbe2bf47-16c8-47cf-b4a5-4b9b187c508b",
+      channel_id: "19:4a95f7d8db4c4e7fae857bcebe0623e6@thread.tacv2",
+      message_id: "1616990032035",
+      content: "Sounds good",
+    });
+  });
+
+  test("reply_to_message replies to the root post when the link points at a reply in the thread", async () => {
+    const link =
+      "https://teams.microsoft.com/l/message/19%3A4a95f7d8db4c4e7fae857bcebe0623e6%40thread.tacv2/1616990171266" +
+      "?groupId=fbe2bf47-16c8-47cf-b4a5-4b9b187c508b&parentMessageId=1616990032035&createdTime=1616990171266";
+    await run(server, "reply_to_message", { message_link: link, content: "Same here" });
+    expect(lastArguments(server, "MICROSOFT_TEAMS_POST_MESSAGE_REPLY").message_id).toBe("1616990032035");
+  });
+
+  test("reply_to_message refuses chat links and missing targets without calling Composio", async () => {
+    const before = executed(server).length;
+
+    const chatLink = "https://teams.microsoft.com/l/message/19:abc@thread.v2/1616990032035?context=%7B%22contextType%22%3A%22chat%22%7D";
+    const chat = await run(server, "reply_to_message", { message_link: chatLink, content: "hi" });
+    expect(chat.isError).toBe(true);
+    expect(chat.text).toContain("isn't to a team channel post");
+
+    const notALink = await run(server, "reply_to_message", { message_link: "general channel", content: "hi" });
+    expect(notALink.isError).toBe(true);
+    expect(notALink.text).toContain("isn't a valid Teams link");
+
+    const nothing = await run(server, "reply_to_message", { content: "hi" });
+    expect(nothing.isError).toBe(true);
+    expect(nothing.text).toContain("Copy link");
+
+    expect(executed(server).length).toBe(before);
+  });
+
   test("create_online_meeting passes the times as given and returns the join link", async () => {
     const args = { subject: "Sync", start_date_time: "2026-11-02T15:00:00-06:00", end_date_time: "2026-11-02T15:30:00-06:00" };
     const r = await run(server, "create_online_meeting", args);

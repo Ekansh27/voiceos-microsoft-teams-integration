@@ -482,24 +482,57 @@ const REPLY_RESULT_CSS = `
 .rm-preview{font-size:12.5px;color:var(--ink-2);line-height:1.35;background:var(--fill-1);padding:8px 10px;border-radius:6px;border:1px solid var(--line);word-break:break-word}
 `;
 
+type ReplyTarget = { team_id: string; channel_id: string; message_id: string };
+
+const COPY_LINK_HINT = "In Teams, use More options, then Copy link on the channel post.";
+
+// A channel post's "Copy link" URL carries all three IDs:
+// /l/message/{channelId}/{messageId}?groupId={teamId}&parentMessageId={rootId}
+function parseMessageLink(link: string): ReplyTarget {
+  let url: URL;
+  try {
+    url = new URL(link.trim());
+  } catch {
+    throw new Error(`That isn't a valid Teams link. ${COPY_LINK_HINT}`);
+  }
+  const match = url.pathname.match(/\/l\/message\/([^/]+)\/([^/]+)/);
+  const teamId = url.searchParams.get("groupId");
+  if (!match || !teamId) {
+    throw new Error(
+      "That link isn't to a team channel post. To reply in a 1:1 or group chat, send a message to that chat instead."
+    );
+  }
+  // A link copied from a reply inside a thread points at that reply; Graph wants the root post.
+  const messageId = url.searchParams.get("parentMessageId") || decodeURIComponent(match[2]);
+  return { team_id: teamId, channel_id: decodeURIComponent(match[1]), message_id: messageId };
+}
+
+function replyTarget(args: any): ReplyTarget {
+  if (args?.message_link) return parseMessageLink(String(args.message_link));
+  if (args?.team_id && args?.channel_id && args?.message_id) {
+    return { team_id: args.team_id, channel_id: args.channel_id, message_id: args.message_id };
+  }
+  throw new Error(`To reply to a channel post, I need its link. ${COPY_LINK_HINT}`);
+}
+
 server.registerTool(
   "reply_to_message",
   {
     title: "Reply to message",
-    description: "Post a reply to an existing message thread in a Microsoft Teams team channel. Use when the user asks to reply to a channel post or thread in a team. Only for team channels: to reply in a 1:1 or group chat, use send_chat_message in that chat.",
+    description: "Reply to a post in a Microsoft Teams team channel. Use when the user asks to reply to a channel post or thread in a team. Pass the post's link (from Copy link on the post in Teams) as message_link; the team, channel and message IDs are only a fallback. Only for team channels: to reply in a 1:1 or group chat, use send_chat_message in that chat.",
     inputSchema: {
-      team_id: z.string().describe("Target Microsoft Teams team ID"),
-      channel_id: z.string().describe("Target channel ID within the team"),
-      message_id: z.string().describe("Root message ID to reply to"),
+      message_link: z.string().optional().describe("Link to the channel post, from Copy link on the post in Teams. Contains the team, channel and message IDs."),
+      team_id: z.string().optional().describe("Team ID. Not needed when message_link is given"),
+      channel_id: z.string().optional().describe("Channel ID within the team. Not needed when message_link is given"),
+      message_id: z.string().optional().describe("Root post ID to reply to. Not needed when message_link is given"),
       content: z.string().describe("Reply message content"),
     } as any,
   },
   async (args: any) => {
+    const target = replyTarget(args);
     const { session } = await getTeamsSession();
     await executeTeamsAction(session, "MICROSOFT_TEAMS_POST_MESSAGE_REPLY", {
-      team_id: args.team_id,
-      channel_id: args.channel_id,
-      message_id: args.message_id,
+      ...target,
       content: args.content,
     });
 
@@ -514,7 +547,7 @@ server.registerTool(
             <span class="rm-badge">Replied</span>
           </div>
           <div class="rm-meta">
-            <span>Thread: ${esc(clip(args.message_id, 16))}</span>
+            <span>Thread: ${esc(clip(target.message_id, 16))}</span>
           </div>
           <div class="rm-preview">${esc(clip(args.content, 180))}</div>
         </div>
@@ -524,9 +557,7 @@ server.registerTool(
 
     const payload = {
       success: true,
-      team_id: args.team_id,
-      channel_id: args.channel_id,
-      message_id: args.message_id,
+      ...target,
       content: args.content,
       _voiceos_glance: { blocks: [{ type: "widget", html: card.html, height: card.height }] },
     };
