@@ -1,0 +1,185 @@
+{
+  "originalPrompt": "Microsoft Teams integration that goes through the Composio TypeScript SDK (@composio/core). Do not call Microsoft Graph directly.\n\nSetup fields: COMPOSIO_API_KEY (secret, required), COMPOSIO_AUTH_CONFIG_ID (required; Composio auth config for the microsoft_teams toolkit), VOICEOS_USER_ID (required; the Composio user ID). Network permission: backend.composio.dev only.\n\nUse a Composio session limited to the microsoft_teams toolkit for every tool: composio.create(VOICEOS_USER_ID, { toolkits: [\"microsoft_teams\"], authConfigs: { microsoft_teams: COMPOSIO_AUTH_CONFIG_ID } }), then session.execute(<slug>, args).\n\nExpose exactly these 6 tools and no others:\n- get_all_chats → MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS (read, no confirmation). Pass user_id \"me\". Return each chat's id, chatType and topic. Tool description: 1:1 chats have no topic, so to find a person's chat, check sender names with get_chat_messages.\n- get_chat_messages → MICROSOFT_TEAMS_LIST_USER_CHAT_MESSAGES (read, no confirmation). Inputs: chat_id, optional top. Pass user_id \"me\". Return sender display name, text and time for each message.\n- send_chat_message → MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE (confirmation). Inputs: chat_id, content, recipient_name (display only; do not send it to Composio). Card: \"Send to {{recipient_name}}\" with an editable content field.\n- reply_to_message → MICROSOFT_TEAMS_POST_MESSAGE_REPLY (confirmation). Inputs: team_id, channel_id, message_id, content. Card: editable reply field.\n- create_online_meeting → MICROSOFT_TEAMS_CREATE_MEETING (confirmation). Inputs: subject, start_date_time, end_date_time (ISO 8601 with the user's local timezone offset). Card: editable subject, start and end.\n- create_channel → MICROSOFT_TEAMS_CREATE_CHANNEL (confirmation). Inputs: team_id, name. Card: editable channel name.\n\nAuth: before each call, check the user's microsoft_teams connected account. If there is none, call session.authorize(\"microsoft_teams\"), open its redirectUrl in the default browser (macOS `open`), and throw \"Connect Microsoft Teams in your browser, then try again.\" If its status is anything other than ACTIVE, or a call fails with an auth error (401, invalid or revoked token), do the same and throw \"Your Teams connection expired or was revoked. Reconnect in your browser, then try again.\"\n\nIf create_channel gets a permission error, throw: \"Creating channels needs admin approval in your organization's Microsoft 365.\"\n\nEvery tool returns JSON data plus a small result card: a chats list, a messages list, \"Message sent\", \"Reply sent\", \"Meeting created\" with the join link, \"Channel created\" with its name. Throw clear, spoken-friendly errors. Use 8-second timeouts on Composio calls.",
+  "preview": {
+    "utterances": [
+      "What are my recent Microsoft Teams chats?",
+      "Send a message to Alex in Teams",
+      "Schedule a Teams meeting with Sarah for 3 PM"
+    ],
+    "toolPreviews": [
+      {
+        "tool": "get_all_chats",
+        "sampleArgs": {
+          "limit": 5
+        },
+        "stressCases": [
+          {
+            "state": "empty",
+            "sampleArgs": {
+              "limit": 5
+            },
+            "sampleData": {
+              "chats": []
+            },
+            "expected": "Centered muted notice stating 'No active chats found'"
+          },
+          {
+            "state": "single",
+            "sampleArgs": {
+              "limit": 1
+            },
+            "sampleData": {
+              "chats": [
+                {
+                  "id": "19:meeting_xyz@thread.v2",
+                  "chatType": "meeting",
+                  "topic": "Sprint Planning Q2"
+                }
+              ]
+            },
+            "expected": "Single meeting chat row with Teams purple badge and Meeting label"
+          }
+        ]
+      },
+      {
+        "tool": "get_chat_messages",
+        "sampleArgs": {
+          "chat_id": "19:meeting_xyz@thread.v2",
+          "top": 5
+        },
+        "stressCases": [
+          {
+            "state": "empty",
+            "sampleArgs": {
+              "chat_id": "19:meeting_xyz@thread.v2"
+            },
+            "sampleData": {
+              "messages": []
+            },
+            "expected": "Muted notice 'No messages in this chat'"
+          },
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "chat_id": "19:meeting_xyz@thread.v2"
+            },
+            "sampleData": {
+              "messages": [
+                {
+                  "id": "msg_001",
+                  "sender": "Satya Nadella",
+                  "text": "We need to align the quarterly operational review across all distributed teams before Friday's executive sync to ensure every metric is audited and signed off by department leads.",
+                  "time": "10:30 AM"
+                }
+              ]
+            },
+            "expected": "Sender name in Teams purple with message clamped to two lines with ellipsis"
+          }
+        ]
+      },
+      {
+        "tool": "send_chat_message",
+        "sampleArgs": {
+          "chat_id": "19:oneOnOne_123@thread.v2",
+          "recipient_name": "Satya Nadella",
+          "content": "Hey Satya, the deployment is complete and live."
+        },
+        "stressCases": [
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "chat_id": "19:oneOnOne_123@thread.v2",
+              "recipient_name": "Satya Nadella",
+              "content": "Hey Satya, following up on the morning briefing: we finalized the core infrastructure benchmarks and verified all regional endpoints with zero latency regression across Europe and North America."
+            },
+            "sampleData": {
+              "success": true,
+              "recipient_name": "Satya Nadella",
+              "content": "Hey Satya, following up on the morning briefing: we finalized the core infrastructure benchmarks and verified all regional endpoints with zero latency regression across Europe and North America."
+            },
+            "expected": "Confirmation card with editable textarea scrolling smoothly within bounded height"
+          }
+        ]
+      },
+      {
+        "tool": "reply_to_message",
+        "sampleArgs": {
+          "team_id": "team_789",
+          "channel_id": "chan_456",
+          "message_id": "msg_123",
+          "content": "Acknowledged, rolling out the hotfix now."
+        },
+        "stressCases": [
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "team_id": "team_789",
+              "channel_id": "chan_456",
+              "message_id": "msg_123",
+              "content": "I reviewed the thread comments and logs. The root cause appears to be an expired cache key in the worker nodes; rolling out the hotfix to mitigate immediately."
+            },
+            "sampleData": {
+              "success": true,
+              "team_id": "team_789",
+              "channel_id": "chan_456",
+              "message_id": "msg_123",
+              "content": "I reviewed the thread comments and logs. The root cause appears to be an expired cache key in the worker nodes; rolling out the hotfix to mitigate immediately."
+            },
+            "expected": "Editable reply textarea bounded to 72px with preserved confirmation action zone"
+          }
+        ]
+      },
+      {
+        "tool": "create_online_meeting",
+        "sampleArgs": {
+          "subject": "Design Review & Sync",
+          "start_date_time": "2025-03-20T15:00:00-04:00",
+          "end_date_time": "2025-03-20T15:30:00-04:00"
+        },
+        "stressCases": [
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "subject": "Global Infrastructure Engineering and Product Operations Architecture Review: Deep-Dive Alignment for Q3 Platform Scalability and Migration",
+              "start_date_time": "2025-03-20T15:00:00-04:00",
+              "end_date_time": "2025-03-20T15:30:00-04:00"
+            },
+            "sampleData": {
+              "success": true,
+              "id": "meet_999",
+              "subject": "Global Infrastructure Engineering and Product Operations Architecture Review: Deep-Dive Alignment for Q3 Platform Scalability and Migration",
+              "joinWebUrl": "",
+              "start_date_time": "2025-03-20T15:00:00-04:00",
+              "end_date_time": "2025-03-20T15:30:00-04:00"
+            },
+            "expected": "Subject input field truncating gracefully with ellipsis and dual-column time inputs"
+          }
+        ]
+      },
+      {
+        "tool": "create_channel",
+        "sampleArgs": {
+          "team_id": "team_789",
+          "name": "ai-platform"
+        },
+        "stressCases": [
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "team_id": "team_789",
+              "name": "enterprise-cloud-infrastructure-cross-functional-engineering-platform-architecture-working-group-emea-na"
+            },
+            "sampleData": {
+              "success": true,
+              "team_id": "team_789",
+              "name": "enterprise-cloud-infrastructure-cross-functional-engineering-platform-architecture-working-group-emea-na",
+              "id": "chan_new_999"
+            },
+            "expected": "Single-line channel input with # prefix in purple and quiet team ID subtitle"
+          }
+        ]
+      }
+    ]
+  },
+  "updatedAt": "2026-10-31T17:40:28.109Z"
+}
