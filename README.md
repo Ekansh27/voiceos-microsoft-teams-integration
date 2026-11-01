@@ -47,10 +47,9 @@ The first time a tool runs, the Microsoft sign-in opens in the browser. Sign in,
 Tested live on Nov 1, 2026 with a UIUC Microsoft 365 account:
 
 - Get all chats, Get chat messages, Send chat message (including editing the text and declining), Create online meeting (correct local time, working join link)
+- Reply to message, from a channel post's copied link
 - Create channel returns the expected admin-approval error
 - Deleting the Composio connection gives the reconnect message, and one sign-in recovers
-
-Reply to message is untested live, because the test account isn't in any Teams team. Its link parsing is covered by the offline tests.
 
 ## Known limitations
 
