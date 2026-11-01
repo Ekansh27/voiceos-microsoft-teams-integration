@@ -55,5 +55,6 @@ Reply to message is untested, because the test account isn't in any Teams team.
 - **Create channel needs admin approval.** Microsoft always requires an org admin to approve `Channel.Create`, and including it blocked sign-in for everyone, so it is left out of the scopes. The tool returns a clear "needs admin approval" error until an admin approves it.
 - **Reply and Create channel need IDs from the user.** They need team, channel and message IDs, and none of the six tools can look them up.
 - **No disconnect UI.** VoiceOS has no settings screens for integrations, and the ticket allows only six tools. Users disconnect by deleting their connection in the Composio dashboard. A `disconnect_teams` tool can be added if approved.
+- **Some old meeting chats still appear in Get all chats.** Chats hidden by the user are skipped, but Teams also hides inactive meeting chats in its own UI without marking them hidden in Microsoft's data. They show up below the recent chats, since the list is sorted newest first.
 - **Personal Microsoft accounts don't work.** Microsoft's Teams API only supports licensed work or school accounts.
 - **Don't use the Studio's refine on this folder.** It regenerates `server.ts` and would undo the hand fixes to the sign-in check and message lookup.
