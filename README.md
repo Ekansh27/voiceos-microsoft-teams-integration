@@ -42,6 +42,8 @@ The first time a tool runs, the Microsoft sign-in opens in the browser. Sign in,
 
 ## Testing
 
+`bun install && bun test` runs 21 offline tests. They start the real server over MCP with `tests/mock-composio.ts` preloaded, which replaces `fetch` with a fake Composio, so no keys or network are needed. They cover the manifest (the six tools, confirmations only on writes, card fields bound to real inputs, declared env vars, the network allowlist), every tool's arguments and results, and the not-connected, expired, revoked-token and missing-setup paths.
+
 Tested live on Nov 1, 2026 with a UIUC Microsoft 365 account:
 
 - Get all chats, Get chat messages, Send chat message (including editing the text and declining), Create online meeting (correct local time, working join link)

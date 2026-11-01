@@ -124,35 +124,31 @@ async function executeTeamsAction(
   slug: string,
   params: Record<string, any>
 ): Promise<any> {
+  // Thrown errors and failed results are mapped in one place, so a reconnect
+  // error is never re-caught and re-mapped (which would request a second link).
+  let errText: string | null = null;
+  let res: any;
   try {
-    const res = await withTimeout(
+    res = await withTimeout(
       session.execute(slug, params, { signal: AbortSignal.timeout(8000) } as any),
       8000
     );
-
     if (res && (res.successful === false || res.error)) {
-      const errStr = typeof res.error === "string" ? res.error : JSON.stringify(res.error || res);
-      if (isAuthError(errStr)) {
-        await handleReauth(session);
-        throw new Error("Your Teams connection expired or was revoked. Reconnect in your browser, then try again.");
-      }
-      if (slug === "MICROSOFT_TEAMS_CREATE_CHANNEL" && isPermissionError(errStr)) {
-        throw new Error("Creating channels needs admin approval in your organization's Microsoft 365.");
-      }
-      throw new Error(errStr);
+      errText = typeof res.error === "string" ? res.error : JSON.stringify(res.error || res);
     }
-    return res;
   } catch (err: any) {
-    const msg = err?.message || String(err || "");
-    if (isAuthError(msg)) {
-      await handleReauth(session);
-      throw new Error("Your Teams connection expired or was revoked. Reconnect in your browser, then try again.");
-    }
-    if (slug === "MICROSOFT_TEAMS_CREATE_CHANNEL" && isPermissionError(msg)) {
-      throw new Error("Creating channels needs admin approval in your organization's Microsoft 365.");
-    }
-    throw err;
+    errText = err?.message || String(err || "");
   }
+  if (errText === null) return res;
+
+  if (isAuthError(errText)) {
+    await handleReauth(session);
+    throw new Error("Your Teams connection expired or was revoked. Reconnect in your browser, then try again.");
+  }
+  if (slug === "MICROSOFT_TEAMS_CREATE_CHANNEL" && isPermissionError(errText)) {
+    throw new Error("Creating channels needs admin approval in your organization's Microsoft 365.");
+  }
+  throw new Error(errText);
 }
 
 // LIST_USER_CHAT_MESSAGES rejects "me" and needs the signed-in user's GUID,
