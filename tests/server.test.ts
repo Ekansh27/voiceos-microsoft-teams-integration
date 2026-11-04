@@ -255,6 +255,11 @@ describe("connected account", () => {
   test("only approved Composio tools were called", () => {
     for (const call of executed(server)) expect(APPROVED_SLUGS).toContain(call.tool_slug);
   });
+
+  // The SDK prints its "Upgrade available" notice to stdout, which is the MCP channel.
+  test("never runs the SDK's npm version check", () => {
+    expect(mockCalls(server).filter((c) => c.host === "registry.npmjs.org")).toEqual([]);
+  });
 });
 
 describe("no connected account", () => {

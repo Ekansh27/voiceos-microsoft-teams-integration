@@ -101,6 +101,8 @@ function getComposioClient(): { composio: Composio; authConfigId: string; userId
   const composio = new Composio({
     apiKey,
     baseUrl: `https://${COMPOSIO_API_HOST}`,
+    // The check prints an upgrade notice to stdout, which corrupts the MCP channel.
+    disableVersionCheck: true,
   } as any);
   return { composio, authConfigId, userId };
 }
