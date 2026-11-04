@@ -1,9 +1,21 @@
 // Preloaded into the server for offline tests: replaces fetch with a fake Composio and
 // logs each call to stderr. MOCK_CONNECTION picks the Teams connection state the fake
-// reports: "active" (default), "none" or "expired".
-const CONNECTION = process.env.MOCK_CONNECTION ?? "active";
+// reports: "active" (default), "none" or "expired". Connecting and disconnecting change it.
+// MOCK_SIGN_IN: "complete" (default), "pending" or "failed".
+// MOCK_REVOKE: "ok" (default) or "unsupported".
+// MOCK_DELETE: "ok" (default), "denied" (key has no write access) or "ignored" (stays connected).
+let connection = process.env.MOCK_CONNECTION ?? "active";
+let accountIds = connection === "none" ? [] : ["ca_test", "ca_duplicate"];
+const SIGN_IN = process.env.MOCK_SIGN_IN ?? "complete";
+const REVOKE = process.env.MOCK_REVOKE ?? "ok";
+const DELETE = process.env.MOCK_DELETE ?? "ok";
 const SESSION_ID = "trs_test";
 const USER_GUID = "8ea0e38b-efb3-4757-924a-5f94061cf8c2";
+
+// Lets the SDK's two-minute sign-in wait run out without the test waiting for it.
+const realNow = Date.now;
+let clockOffset = 0;
+Date.now = () => realNow() + clockOffset;
 
 const respond = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -49,13 +61,58 @@ function execute(slug: string, args: Record<string, any>): Response {
   }
 }
 
+const rawAccount = (id: string, status: string) => ({
+  id,
+  auth_config: { id: "ac_test", auth_scheme: "OAUTH2", is_composio_managed: true, is_disabled: false },
+  toolkit: { slug: "microsoft_teams" },
+  status,
+  status_reason: null,
+  is_disabled: false,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+});
+
+function connectedAccounts(method: string, path: string): Response | undefined {
+  if (path === "/connected_accounts" && method === "GET") {
+    const status = connection === "expired" ? "EXPIRED" : "ACTIVE";
+    return respond({ items: accountIds.map((id) => rawAccount(id, status)), next_cursor: null, total_pages: 1 });
+  }
+  const match = path.match(/^\/connected_accounts\/([^/]+)(\/revoke)?$/);
+  if (!match) return undefined;
+  const [, id, revoke] = match;
+
+  if (revoke && method === "POST") {
+    if (REVOKE === "unsupported") return respond({ error: { message: "Revocation isn't supported" } }, 400);
+    return respond({ revoked_tokens: ["access_token", "refresh_token"], connected_account: { id, status: "REVOKED" } });
+  }
+  if (method === "DELETE") {
+    if (DELETE === "denied") return respond({ error: { message: "Forbidden" } }, 403);
+    if (DELETE !== "ignored") {
+      accountIds = accountIds.filter((existing) => existing !== id);
+      if (accountIds.length === 0) connection = "none";
+    }
+    return respond({ success: true });
+  }
+  if (method === "GET") {
+    if (SIGN_IN === "failed") return respond(rawAccount(id, "FAILED"));
+    if (SIGN_IN === "pending") {
+      clockOffset += 200_000;
+      return respond(rawAccount(id, "INITIATED"));
+    }
+    if (!accountIds.includes(id)) accountIds = [id];
+    connection = "active";
+    return respond(rawAccount(id, "ACTIVE"));
+  }
+  return undefined;
+}
+
 function toolkits(): Response {
   const connected_account =
-    CONNECTION === "none"
+    connection === "none"
       ? undefined
       : {
-          id: "ca_test",
-          status: CONNECTION === "expired" ? "EXPIRED" : "ACTIVE",
+          id: accountIds[0],
+          status: connection === "expired" ? "EXPIRED" : "ACTIVE",
           auth_config: { id: "ac_test", auth_scheme: "OAUTH2", is_composio_managed: true },
         };
   return respond({
@@ -90,5 +147,8 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     return respond({ redirect_url: "https://connect.composio.dev/link/test", connected_account_id: "ca_new", link_token: "lt_test" });
   }
   if (path === `/tool_router/session/${SESSION_ID}/execute`) return execute(body?.tool_slug, body?.arguments ?? {});
-  return respond({ error: { message: `Unexpected request: ${request.method} ${path}` } }, 404);
+  return (
+    connectedAccounts(request.method, path) ??
+    respond({ error: { message: `Unexpected request: ${request.method} ${path}` } }, 404)
+  );
 }) as typeof fetch;

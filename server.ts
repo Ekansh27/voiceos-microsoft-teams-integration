@@ -74,13 +74,20 @@ async function handleReauth(session: any): Promise<void> {
 }
 
 // The session reports the Teams connection for this user and auth config.
-async function ensureTeamsAuth(session: any): Promise<void> {
+async function readConnection(session: any): Promise<{ connected: boolean; status: string }> {
   const res = await withTimeout(session.toolkits({ toolkits: ["microsoft_teams"] }), 8000);
   const connection = res?.items?.find((t: any) => t?.slug === "microsoft_teams")?.connection;
-  if (connection?.isActive) return;
+  return {
+    connected: Boolean(connection?.isActive),
+    status: String(connection?.connectedAccount?.status || "").toUpperCase(),
+  };
+}
+
+async function ensureTeamsAuth(session: any): Promise<void> {
+  const { connected, status } = await readConnection(session);
+  if (connected) return;
 
   await handleReauth(session);
-  const status = String(connection?.connectedAccount?.status || "").toUpperCase();
   if (["EXPIRED", "REVOKED", "FAILED", "INACTIVE"].includes(status)) {
     throw new Error("Your Teams connection expired or was revoked. Reconnect in your browser, then try again.");
   }
@@ -107,16 +114,19 @@ function getComposioClient(): { composio: Composio; authConfigId: string; userId
   return { composio, authConfigId, userId };
 }
 
-async function getTeamsSession(): Promise<{ session: any }> {
+async function openTeamsSession(): Promise<any> {
   const { composio, authConfigId, userId } = getComposioClient();
-  const session = await withTimeout(
+  return withTimeout(
     composio.create(userId, {
       toolkits: ["microsoft_teams"],
       authConfigs: { microsoft_teams: authConfigId },
     }),
     8000
   );
+}
 
+async function getTeamsSession(): Promise<{ session: any }> {
+  const session = await openTeamsSession();
   await ensureTeamsAuth(session);
   return { session };
 }
@@ -521,7 +531,7 @@ server.registerTool(
   "reply_to_message",
   {
     title: "Reply to message",
-    description: "Reply to a post in a Microsoft Teams team channel. Use when the user asks to reply to a channel post or thread in a team. Pass the post's link (from Copy link on the post in Teams) as message_link; the team, channel and message IDs are only a fallback. Only for team channels: to reply in a 1:1 or group chat, use send_chat_message in that chat.",
+    description: "Post a reply to a Microsoft Teams channel post, directly in Teams. Use whenever the user asks to reply to a Teams post or thread, and always when their request includes a teams.microsoft.com/l/message link. Use this instead of drafting a reply: a draft is only copied to the clipboard and never gets posted. Pass the link as message_link; the team, channel and message IDs are only a fallback. If the user didn't say what to reply, ask them. Only for team channels: to reply in a 1:1 or group chat, use send_chat_message in that chat.",
     inputSchema: {
       message_link: z.string().optional().describe("Link to the channel post, from Copy link on the post in Teams. Contains the team, channel and message IDs."),
       team_id: z.string().optional().describe("Team ID. Not needed when message_link is given"),
@@ -703,6 +713,260 @@ server.registerTool(
       _voiceos_glance: { blocks: [{ type: "widget", html: card.html, height: card.height }] },
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Account tools: connect_account, connection_status, disconnect_account
+// Integration Studio has no native account linking, so the integration ships
+// its own. These sit outside the six approved Teams tools.
+// ---------------------------------------------------------------------------
+const SIGN_IN_WAIT_MS = 120_000; // Stays under the 135s a card waits for a tool result.
+const PENDING_STATUSES = ["INITIATED", "INITIALIZING", "PENDING"];
+const CONNECTED_MESSAGE = "Microsoft Teams is connected and ready to use.";
+
+const ACCOUNT_CSS = `
+.ta{font:13px/1.4 "Segoe UI",-apple-system,BlinkMacSystemFont,sans-serif;padding:12px 14px 14px}
+.ta-hd{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.ta-title{font-size:13px;font-weight:600;color:var(--ink-1)}
+.ta-badge{margin-left:auto;font-size:10px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--accent);background:color-mix(in srgb,var(--accent) 18%,transparent);padding:2px 7px;border-radius:999px}
+.ta-status{font-size:12.5px;color:var(--ink-2);line-height:1.35;margin-bottom:12px}
+[aria-busy=true] .ta-status:before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:ta-spin .8s linear infinite}
+@keyframes ta-spin{to{transform:rotate(360deg)}}
+.ta-actions{display:flex;gap:8px}
+.ta-btn{font-family:inherit;font-size:12px;font-weight:600;padding:7px 12px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--ink-1);cursor:pointer}
+.ta-primary{background:var(--accent);border-color:var(--accent);color:#ffffff}
+.ta-btn:disabled{opacity:.5;cursor:default}
+`;
+
+type AccountResult = { content: { type: "text"; text: string }[] };
+
+function accountResult(connected: boolean, status: string, message: string): AccountResult {
+  const data = { connected, status, message };
+  const initial = JSON.stringify(data).replace(/</g, "\\u003c");
+  // The buttons call the tools through VoiceOS, which shows each tool's own
+  // confirmation card first. The card never touches credentials.
+  const card = renderCustom({
+    accent: ACCENT,
+    css: ACCOUNT_CSS,
+    label: "Microsoft Teams account controls",
+    height: 140,
+    body: `
+      <div class="ta">
+        <div class="ta-hd">
+          ${markHtml()}
+          <span class="ta-title">Teams account</span>
+          <span class="ta-badge" id="ta-badge"></span>
+        </div>
+        <p class="ta-status" id="ta-status" role="status" aria-live="polite"></p>
+        <div class="ta-actions">
+          <button class="ta-btn ta-primary" id="ta-account" disabled></button>
+          <button class="ta-btn" id="ta-refresh" disabled>Refresh</button>
+        </div>
+      </div>
+      <script>(function(){
+        var data=${initial},ready=false,capable=false,busy=false;
+        var byId=function(id){return document.getElementById(id)};
+        var account=byId("ta-account"),refresh=byId("ta-refresh");
+        function paint(){
+          byId("ta-status").textContent=data.message+(ready&&!capable?" Use voice commands to connect or disconnect on this VoiceOS version.":"");
+          byId("ta-badge").textContent=data.status;
+          account.textContent=data.connected?"Disconnect":"Connect";
+          account.disabled=refresh.disabled=!capable||busy;
+          document.body.setAttribute("aria-busy",String(busy));
+        }
+        function call(name,waiting){
+          if(!capable||busy)return;
+          busy=true;data.message=waiting;paint();
+          window.voiceos.invokeTool(name,{}).then(function(m){
+            busy=false;
+            var block=m.result&&m.result.content&&m.result.content.find(function(x){return x.type==="text"});
+            var payload=null;try{payload=block&&JSON.parse(block.text)}catch(e){}
+            if(payload&&typeof payload.connected==="boolean")data=payload;
+            else data.message=(block&&block.text)||m.error||(m.status==="cancelled"?"Cancelled.":m.status==="completed"?"Finished. Refresh to check the connection.":"Couldn't confirm that. Refresh before trying again.");
+            paint();
+          });
+        }
+        addEventListener("message",function(e){
+          if(e.source!==parent||!e.data||e.data.type!=="voiceos:init")return;
+          ready=true;capable=!!(e.data.capabilities&&e.data.capabilities.invokeTool);paint();
+        });
+        account.onclick=function(){
+          if(data.connected)call("disconnect_account","Disconnecting Microsoft Teams…");
+          else call("connect_account","Waiting for you to sign in to Microsoft in your browser…");
+        };
+        refresh.onclick=function(){call("connection_status","Checking the connection…")};
+        paint();
+      })()</script>
+    `,
+  });
+  const payload = {
+    ...data,
+    _voiceos_glance: { blocks: [{ type: "widget", html: card.html, height: card.height, label: card.label }] },
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
+}
+
+function statusResult(connected: boolean, status: string): AccountResult {
+  if (connected) return accountResult(true, "Connected", CONNECTED_MESSAGE);
+  if (status === "EXPIRED") return accountResult(false, "Expired", "Your Teams connection expired. Connect again to sign in.");
+  if (status === "REVOKED") return accountResult(false, "Revoked", "Your Teams connection was revoked. Connect again to sign in.");
+  if (PENDING_STATUSES.includes(status)) {
+    return accountResult(false, "Waiting for sign-in", "Finish signing in to Microsoft in your browser, then refresh.");
+  }
+  if (status) return accountResult(false, "Inactive", "Your Teams connection isn't active. Connect again to sign in.");
+  return accountResult(false, "Not connected", "Microsoft Teams isn't connected. Connect to sign in with your Microsoft account.");
+}
+
+const httpStatus = (err: any): number | undefined => err?.status ?? err?.cause?.status;
+
+function accountError(err: any): Error {
+  const status = httpStatus(err);
+  if (status === 401) return new Error("Composio rejected your API key. Update it in the Microsoft Teams settings in VoiceOS.");
+  if (status === 403) {
+    return new Error("Your Composio API key can't change connections. Give it write access to Connected accounts, then try again.");
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+async function connect(): Promise<AccountResult> {
+  const session = await openTeamsSession();
+  if ((await readConnection(session)).connected) return accountResult(true, "Connected", CONNECTED_MESSAGE);
+
+  const request: any = await withTimeout(session.authorize("microsoft_teams"), 8000);
+  const url = String(request?.redirectUrl || "");
+  if (!url.startsWith("https://")) throw new Error("Composio didn't return a valid sign-in link. Try again in a moment.");
+  openBrowser(url);
+
+  try {
+    await request.waitForConnection(SIGN_IN_WAIT_MS);
+  } catch (err: any) {
+    const reason = String(err?.message || "");
+    if (/timed out/i.test(reason)) return statusResult(false, "PENDING");
+    if (/failed with status/i.test(reason)) throw new Error("Microsoft sign-in didn't complete. Try connecting again.");
+    throw accountError(err);
+  }
+
+  cachedUserGuid = null; // The user may have signed in with a different Microsoft account.
+  if (!(await readConnection(await openTeamsSession())).connected) {
+    throw new Error("Sign-in finished, but Composio doesn't show Teams as connected yet. Refresh in a moment.");
+  }
+  return accountResult(true, "Connected", CONNECTED_MESSAGE);
+}
+
+async function disconnect(): Promise<AccountResult> {
+  const { composio, authConfigId, userId } = getComposioClient();
+  const accounts = composio.connectedAccounts;
+  let revokedAtMicrosoft = true;
+  let removed = 0;
+  try {
+    // Limited to this user and auth config. Removes every copy, since the session could pick up a leftover duplicate.
+    const { items } = await withTimeout(
+      accounts.list({ userIds: [userId], authConfigIds: [authConfigId], toolkitSlugs: ["microsoft_teams"], limit: 100 }),
+      8000
+    );
+    for (const account of items) {
+      try {
+        await withTimeout(accounts.revoke(account.id), 12000);
+      } catch (err) {
+        // 400 means Composio can't revoke at the provider, 409 means this connection can't be revoked now.
+        if (![400, 409].includes(httpStatus(err) ?? 0)) throw err;
+        revokedAtMicrosoft = false;
+      }
+      // Deleted rather than disabled: deleting and signing in again is the path tested live with sessions.
+      await withTimeout(accounts.delete(account.id), 8000);
+      removed += 1;
+    }
+  } catch (err) {
+    throw accountError(err);
+  }
+
+  cachedUserGuid = null;
+  if ((await readConnection(await openTeamsSession())).connected) {
+    throw new Error("Composio still shows Teams as connected. Refresh and try again.");
+  }
+  if (removed === 0) return accountResult(false, "Not connected", "Microsoft Teams is already disconnected.");
+  return accountResult(
+    false,
+    "Not connected",
+    revokedAtMicrosoft
+      ? "Microsoft Teams is disconnected. No chats or messages were deleted."
+      : "Microsoft Teams is disconnected in Composio. No chats or messages were deleted. To also remove Microsoft's consent, revoke the app in your Microsoft account."
+  );
+}
+
+async function notifyUser(message: string): Promise<void> {
+  try {
+    await server.server.request(
+      { method: "voiceos/reminders/trigger", params: { message: message.slice(0, 1900), speak: false } } as any,
+      z.object({ notificationId: z.string() }),
+      { timeout: 4000 }
+    );
+  } catch {
+    console.error("VoiceOS couldn't queue the Teams notification. The tool result is still available.");
+  }
+}
+
+// Connecting runs in the background, so the outcome also goes out as a notification.
+async function withNotification(action: string, run: () => Promise<AccountResult>): Promise<AccountResult> {
+  try {
+    const result = await run();
+    await notifyUser(`Microsoft Teams: ${JSON.parse(result.content[0].text).message}`);
+    return result;
+  } catch (err: any) {
+    await notifyUser(`Microsoft Teams: ${action} failed. ${err?.message || ""}`.trim());
+    throw err;
+  }
+}
+
+let connecting: Promise<AccountResult> | undefined;
+let disconnecting: Promise<AccountResult> | undefined;
+
+server.registerTool(
+  "connect_account",
+  {
+    title: "Connect Microsoft Teams",
+    description: "Connect the user's Microsoft Teams account by signing in through Composio in the browser. Use when the user asks to connect, link, or sign in to Microsoft Teams. If Teams is already connected, it only verifies that.",
+    inputSchema: {} as any,
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  async () => {
+    if (disconnecting) throw new Error("A Teams disconnect is still running. Wait for it to finish before connecting.");
+    connecting ??= withNotification("Connect", connect).finally(() => {
+      connecting = undefined;
+    });
+    return connecting;
+  }
+);
+
+server.registerTool(
+  "connection_status",
+  {
+    title: "Teams account",
+    description: "Show whether Microsoft Teams is connected, with Connect, Disconnect and Refresh controls. Use when the user asks about their Teams account, connection status, or an expired or revoked sign-in. Read only: it never starts a sign-in.",
+    inputSchema: {} as any,
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  },
+  async () => {
+    const { connected, status } = await readConnection(await openTeamsSession());
+    return statusResult(connected, status);
+  }
+);
+
+server.registerTool(
+  "disconnect_account",
+  {
+    title: "Disconnect Microsoft Teams",
+    description: "Disconnect the user's Microsoft Teams account: revokes access where Composio supports it and removes the connection. Use only when the user explicitly asks to disconnect or unlink Microsoft Teams. Never deletes chats or messages.",
+    inputSchema: {} as any,
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  async () => {
+    if (connecting) throw new Error("Teams sign-in is still running. Finish it or wait before disconnecting.");
+    disconnecting ??= withNotification("Disconnect", disconnect).finally(() => {
+      disconnecting = undefined;
+    });
+    return disconnecting;
   }
 );
 

@@ -20,7 +20,15 @@ const APPROVED_TOOLS = [
   "create_online_meeting",
   "create_channel",
 ];
-const WRITE_TOOLS = ["send_chat_message", "reply_to_message", "create_online_meeting", "create_channel"];
+const ACCOUNT_TOOLS = ["connect_account", "connection_status", "disconnect_account"];
+const WRITE_TOOLS = [
+  "send_chat_message",
+  "reply_to_message",
+  "create_online_meeting",
+  "create_channel",
+  "connect_account",
+  "disconnect_account",
+];
 const APPROVED_SLUGS = [
   "MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS",
   "MICROSOFT_TEAMS_CREATE_CHANNEL",
@@ -55,6 +63,8 @@ const executed = (server: Server) =>
   mockCalls(server).filter((c) => c.path.endsWith("/execute")).map((c) => c.body as { tool_slug: string; arguments: any });
 const lastArguments = (server: Server, slug: string) => executed(server).filter((c) => c.tool_slug === slug).at(-1)?.arguments;
 const linkRequests = (server: Server) => mockCalls(server).filter((c) => c.path.endsWith("/link"));
+const accountRequests = (server: Server, method: string, suffix = "") =>
+  mockCalls(server).filter((c) => c.method === method && /^\/connected_accounts\/[^/]+/.test(c.path) && c.path.endsWith(suffix));
 
 async function run(server: Server, name: string, args: Record<string, unknown>) {
   const result: any = await server.client.callTool({ name, arguments: args });
@@ -76,12 +86,30 @@ describe("manifest", () => {
     expect(manifest.summary.length).toBeLessThanOrEqual(140);
   });
 
-  test("declares exactly the six approved tools", () => {
-    expect(manifest.tools.map((t: any) => t.name)).toEqual(APPROVED_TOOLS);
+  test("declares exactly the six approved tools plus the three account tools", () => {
+    expect(manifest.tools.map((t: any) => t.name)).toEqual([...APPROVED_TOOLS, ...ACCOUNT_TOOLS]);
   });
 
-  test("allows only the Composio domain", () => {
-    expect(manifest.permissions).toEqual([{ kind: "network", domains: ["backend.composio.dev"] }]);
+  test("allows only the Composio domain, plus the background and notify permissions connecting needs", () => {
+    expect(manifest.permissions).toEqual([
+      { kind: "network", domains: ["backend.composio.dev"] },
+      { kind: "background" },
+      { kind: "notify" },
+    ]);
+    expect(manifest.tools.find((t: any) => t.name === "connect_account").execution.mode).toBe("background");
+  });
+
+  test("only the account tools can be called from a card", () => {
+    const callable = manifest.tools.filter((t: any) => t.uiCallable).map((t: any) => t.name);
+    expect(callable).toEqual(ACCOUNT_TOOLS);
+  });
+
+  test("connect and disconnect confirm with exactly one confirm and one cancel", () => {
+    for (const name of ["connect_account", "disconnect_account"]) {
+      const { root } = manifest.tools.find((t: any) => t.name === name).confirmation;
+      const roles = root.footer[0].items.map((item: any) => item.role).sort();
+      expect(roles).toEqual(["cancel", "confirm"]);
+    }
   });
 
   test("puts a confirmation card on every write and on no read", () => {
@@ -91,7 +119,7 @@ describe("manifest", () => {
   });
 
   test("binds every confirmation field to a real tool input", () => {
-    for (const tool of manifest.tools.filter((t: any) => t.confirmation)) {
+    for (const tool of manifest.tools.filter((t: any) => t.confirmation?.root.type === "widget")) {
       const bound = [...String(tool.confirmation.root.html).matchAll(/data-voiceos-key="([a-z_]+)"/g)].map((m) => m[1]);
       expect(bound.length).toBeGreaterThan(0);
       for (const key of bound) expect(Object.keys(tool.inputSchema.properties)).toContain(key);
@@ -111,6 +139,44 @@ describe("manifest", () => {
   });
 });
 
+describe("meeting confirmation card", () => {
+  const html: string = manifest.tools.find((t: any) => t.name === "create_online_meeting").confirmation.root.html;
+  const script = html.match(/<script>(function readableMeetingTime[\s\S]*?)<\/script>/)?.[1] ?? "";
+  const readableMeetingTime: (start: string, end: string, timeZone?: string) => string | null =
+    new Function(`${script}; return readableMeetingTime;`)();
+  const year = new Date().getFullYear();
+  const inChicago = (start: string, end: string, onYear = year) =>
+    readableMeetingTime(`${onYear}-${start}`, `${onYear}-${end}`, "America/Chicago");
+
+  test("shows the date, times and time zone in one line", () => {
+    expect(inChicago("12-04T17:00:00-06:00", "12-04T17:30:00-06:00")).toBe("Dec 4, 5:00–5:30 PM CST");
+    expect(inChicago("07-04T17:00:00-05:00", "07-04T17:30:00-05:00")).toBe("Jul 4, 5:00–5:30 PM CDT");
+  });
+
+  test("keeps AM and PM across noon, and both dates across midnight", () => {
+    expect(inChicago("12-04T11:30:00-06:00", "12-04T12:30:00-06:00")).toBe("Dec 4, 11:30 AM–12:30 PM CST");
+    expect(inChicago("12-04T23:30:00-06:00", "12-05T00:30:00-06:00")).toBe("Dec 4, 11:30 PM – Dec 5, 12:30 AM CST");
+  });
+
+  test("shows the user's own time when the agent sends a different offset", () => {
+    expect(inChicago("12-04T18:00:00-05:00", "12-04T18:30:00-05:00")).toBe("Dec 4, 5:00–5:30 PM CST");
+  });
+
+  test("adds the year only for a meeting in another year", () => {
+    expect(inChicago("12-04T17:00:00-06:00", "12-04T17:30:00-06:00", year + 1)).toBe(`Dec 4, ${year + 1}, 5:00–5:30 PM CST`);
+  });
+
+  test("doesn't guess at a time it can't read", () => {
+    expect(readableMeetingTime("next Tuesday", "2026-12-04T17:30:00-06:00")).toBeNull();
+  });
+
+  test("keeps the exact times bound for sending, without showing them", () => {
+    expect(html).toContain('<input type="hidden" id="mc-start" data-voiceos-key="start_date_time">');
+    expect(html).toContain('<input type="hidden" id="mc-end" data-voiceos-key="end_date_time">');
+    expect(html).not.toContain('placeholder="2025-03-20T15');
+  });
+});
+
 describe("connected account", () => {
   let server: Server;
 
@@ -122,9 +188,9 @@ describe("connected account", () => {
     await server.client.close();
   });
 
-  test("the server exposes the same six tools and inputs as the manifest", async () => {
+  test("the server exposes the same tools and inputs as the manifest", async () => {
     const { tools } = await server.client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual([...APPROVED_TOOLS].sort());
+    expect(tools.map((t) => t.name).sort()).toEqual([...APPROVED_TOOLS, ...ACCOUNT_TOOLS].sort());
     for (const tool of tools) {
       const declared = manifest.tools.find((t: any) => t.name === tool.name);
       expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(Object.keys(declared.inputSchema.properties).sort());
@@ -319,5 +385,174 @@ describe("missing setup", () => {
     expect(r.isError).toBe(true);
     expect(r.text).toContain("COMPOSIO_API_KEY, COMPOSIO_AUTH_CONFIG_ID, and VOICEOS_USER_ID");
     expect(mockCalls(server)).toHaveLength(0);
+  });
+
+  test("the account tools say which settings are missing too", async () => {
+    for (const name of ACCOUNT_TOOLS) {
+      const r = await run(server, name, {});
+      expect(r.isError).toBe(true);
+      expect(r.text).toContain("COMPOSIO_API_KEY, COMPOSIO_AUTH_CONFIG_ID, and VOICEOS_USER_ID");
+    }
+    expect(mockCalls(server)).toHaveLength(0);
+  });
+});
+
+describe("account tools", () => {
+  const started: Server[] = [];
+  const startWith = async (mock: Record<string, string>) => {
+    const server = await startServer({ ...SETUP_ENV, ...mock });
+    started.push(server);
+    return server;
+  };
+
+  afterAll(async () => {
+    await Promise.all(started.map((server) => server.client.close()));
+  });
+
+  test("connection_status shows a connected account with Disconnect and Refresh controls", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active" });
+    const r = await run(server, "connection_status", {});
+    expect(r.isError).toBe(false);
+    expect(r.body).toMatchObject({ connected: true, status: "Connected" });
+    expect(r.block.type).toBe("widget");
+    expect(r.html).toContain("Teams account");
+    for (const name of ACCOUNT_TOOLS) expect(r.html).toContain(`"${name}"`);
+    expect(linkRequests(server)).toHaveLength(0);
+  });
+
+  test("connection_status never starts a sign-in", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none" });
+    const r = await run(server, "connection_status", {});
+    expect(r.isError).toBe(false);
+    expect(r.body).toMatchObject({ connected: false, status: "Not connected" });
+    expect(linkRequests(server)).toHaveLength(0);
+  });
+
+  test("connection_status tells the user an expired sign-in needs connecting again", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "expired" });
+    const r = await run(server, "connection_status", {});
+    expect(r.body).toMatchObject({ connected: false, status: "Expired" });
+    expect(r.body.message).toContain("Connect again");
+    expect(linkRequests(server)).toHaveLength(0);
+  });
+
+  test("connect_account doesn't start a sign-in when Teams is already connected", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active" });
+    const r = await run(server, "connect_account", {});
+    expect(r.body).toMatchObject({ connected: true, status: "Connected" });
+    expect(linkRequests(server)).toHaveLength(0);
+  });
+
+  test("connect_account signs in, waits for it to finish, and the tools then work", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none" });
+    const r = await run(server, "connect_account", {});
+    expect(r.isError).toBe(false);
+    expect(r.body).toMatchObject({ connected: true, status: "Connected" });
+    expect(linkRequests(server)).toHaveLength(1);
+    expect(linkRequests(server)[0].body).toEqual({ toolkit: "microsoft_teams" });
+
+    const chats = await run(server, "get_all_chats", {});
+    expect(chats.isError).toBe(false);
+    expect(linkRequests(server)).toHaveLength(1);
+  });
+
+  test("connect_account fixes an expired connection", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "expired" });
+    const r = await run(server, "connect_account", {});
+    expect(r.body).toMatchObject({ connected: true, status: "Connected" });
+    expect((await run(server, "connection_status", {})).body.connected).toBe(true);
+  });
+
+  test("two connects at once share one sign-in", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none" });
+    const [first, second] = await Promise.all([run(server, "connect_account", {}), run(server, "connect_account", {})]);
+    expect(first.body.connected).toBe(true);
+    expect(second.body.connected).toBe(true);
+    expect(linkRequests(server)).toHaveLength(1);
+  });
+
+  test("connect_account says to refresh when the sign-in hasn't finished in time", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none", MOCK_SIGN_IN: "pending" });
+    const r = await run(server, "connect_account", {});
+    expect(r.isError).toBe(false);
+    expect(r.body).toMatchObject({ connected: false, status: "Waiting for sign-in" });
+    expect(r.body.message).toContain("then refresh");
+  });
+
+  test("connect_account reports a failed sign-in", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none", MOCK_SIGN_IN: "failed" });
+    const r = await run(server, "connect_account", {});
+    expect(r.isError).toBe(true);
+    expect(r.text).toBe("Microsoft sign-in didn't complete. Try connecting again.");
+  });
+
+  test("disconnect_account revokes and removes only this user's Teams connections", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active" });
+    const r = await run(server, "disconnect_account", {});
+    expect(r.isError).toBe(false);
+    expect(r.body).toMatchObject({ connected: false, status: "Not connected" });
+    expect(r.body.message).toBe("Microsoft Teams is disconnected. No chats or messages were deleted.");
+
+    const list = mockCalls(server).find((c) => c.path === "/connected_accounts");
+    const query = new URLSearchParams(list.query);
+    expect(query.getAll("user_ids")).toEqual(["tester"]);
+    expect(query.getAll("auth_config_ids")).toEqual(["ac_test"]);
+    expect(query.getAll("toolkit_slugs")).toEqual(["microsoft_teams"]);
+
+    const removed = accountRequests(server, "DELETE").map((c) => c.path);
+    expect(removed).toEqual(["/connected_accounts/ca_test", "/connected_accounts/ca_duplicate"]);
+    expect(accountRequests(server, "POST", "/revoke")).toHaveLength(2);
+    expect((await run(server, "connection_status", {})).body.connected).toBe(false);
+  });
+
+  test("disconnect_account still removes the connection when Composio can't revoke at Microsoft", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active", MOCK_REVOKE: "unsupported" });
+    const r = await run(server, "disconnect_account", {});
+    expect(r.isError).toBe(false);
+    expect(r.body.connected).toBe(false);
+    expect(r.body.message).toContain("revoke the app in your Microsoft account");
+    expect(accountRequests(server, "DELETE")).toHaveLength(2);
+  });
+
+  test("disconnect_account explains when the API key can't change connections", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active", MOCK_DELETE: "denied" });
+    const r = await run(server, "disconnect_account", {});
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("write access to Connected accounts");
+    expect((await run(server, "connection_status", {})).body.connected).toBe(true);
+  });
+
+  test("disconnect_account doesn't claim success if Composio still shows Teams connected", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active", MOCK_DELETE: "ignored" });
+    const r = await run(server, "disconnect_account", {});
+    expect(r.isError).toBe(true);
+    expect(r.text).toBe("Composio still shows Teams as connected. Refresh and try again.");
+  });
+
+  test("disconnect_account does nothing when Teams isn't connected", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "none" });
+    const r = await run(server, "disconnect_account", {});
+    expect(r.body.message).toBe("Microsoft Teams is already disconnected.");
+    expect(accountRequests(server, "DELETE")).toHaveLength(0);
+    expect(accountRequests(server, "POST", "/revoke")).toHaveLength(0);
+  });
+
+  test("after a disconnect, a Teams tool falls back to opening the sign-in", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active" });
+    await run(server, "disconnect_account", {});
+    const r = await run(server, "get_all_chats", {});
+    expect(r.isError).toBe(true);
+    expect(r.text).toBe("Connect Microsoft Teams in your browser, then try again.");
+    expect(linkRequests(server)).toHaveLength(1);
+  });
+
+  test("reconnecting looks up the signed-in user's ID again, in case the account changed", async () => {
+    const server = await startWith({ MOCK_CONNECTION: "active" });
+    await run(server, "get_chat_messages", { chat_id: "19:newest" });
+    await run(server, "disconnect_account", {});
+    await run(server, "connect_account", {});
+    await run(server, "get_chat_messages", { chat_id: "19:newest" });
+    const lookups = executed(server).filter((c) => c.tool_slug === "MICROSOFT_TEAMS_GET_MY_PROFILE");
+    expect(lookups).toHaveLength(2);
   });
 });
